@@ -24,17 +24,24 @@ use crate::{Builder, Handler};
 
 pub mod embassy_net;
 
+//5.1:
+//Device Class, SubClass, Protocol
+//Interface Class, SubClass, Protocol
+//Then some descriptors:
+// Length
+// Type
+// Subtype
+//  fields
+
 /// This should be used as `device_class` when building the `UsbDevice`.
-pub const USB_CLASS_CDC: u8 = 0x02;
+pub const USB_CLASS_CDC: u8 = 0x02; //Communications *Device Class*
+const CDC_SUBCLASS_NCM: u8 = 0x0d; //CDC Subclass Code
 
-const USB_CLASS_CDC_DATA: u8 = 0x0a;
-const CDC_SUBCLASS_NCM: u8 = 0x0d;
+const CDC_PROTOCOL_NONE: u8 = 0x00; //4.6 Unused
+const CDC_PROTOCOL_NTB: u8 = 0x01; //4.7 network transfer block
 
-const CDC_PROTOCOL_NONE: u8 = 0x00;
-const CDC_PROTOCOL_NTB: u8 = 0x01;
-
-const CS_INTERFACE: u8 = 0x24;
-const CDC_TYPE_HEADER: u8 = 0x00;
+const CS_INTERFACE: u8 = 0x24; //Descriptor type
+const CDC_TYPE_HEADER: u8 = 0x00; //Descriptor subtypes:
 const CDC_TYPE_UNION: u8 = 0x06;
 const CDC_TYPE_ETHERNET: u8 = 0x0F;
 const CDC_TYPE_NCM: u8 = 0x1A;
@@ -46,17 +53,17 @@ const REQ_SEND_ENCAPSULATED_COMMAND: u8 = 0x00;
 //const REQ_GET_ETHERNET_POWER_MANAGEMENT_PATTERN_FILTER: u8 = 0x42;
 //const REQ_SET_ETHERNET_PACKET_FILTER: u8 = 0x43;
 //const REQ_GET_ETHERNET_STATISTIC: u8 = 0x44;
-const REQ_GET_NTB_PARAMETERS: u8 = 0x80;
-//const REQ_GET_NET_ADDRESS: u8 = 0x81;
-//const REQ_SET_NET_ADDRESS: u8 = 0x82;
-//const REQ_GET_NTB_FORMAT: u8 = 0x83;
-//const REQ_SET_NTB_FORMAT: u8 = 0x84;
-//const REQ_GET_NTB_INPUT_SIZE: u8 = 0x85;
-const REQ_SET_NTB_INPUT_SIZE: u8 = 0x86;
-//const REQ_GET_MAX_DATAGRAM_SIZE: u8 = 0x87;
-//const REQ_SET_MAX_DATAGRAM_SIZE: u8 = 0x88;
-//const REQ_GET_CRC_MODE: u8 = 0x89;
-//const REQ_SET_CRC_MODE: u8 = 0x8A;
+const REQ_GET_NTB_PARAMETERS: u8 = 0x80; //REQUIRED
+                                         //const REQ_GET_NET_ADDRESS: u8 = 0x81;
+                                         //const REQ_SET_NET_ADDRESS: u8 = 0x82;
+                                         //const REQ_GET_NTB_FORMAT: u8 = 0x83;
+                                         //const REQ_SET_NTB_FORMAT: u8 = 0x84;
+                                         //const REQ_GET_NTB_INPUT_SIZE: u8 = 0x85;
+const REQ_SET_NTB_INPUT_SIZE: u8 = 0x86; //REQUIRED
+                                         //const REQ_GET_MAX_DATAGRAM_SIZE: u8 = 0x87;
+                                         //const REQ_SET_MAX_DATAGRAM_SIZE: u8 = 0x88;
+                                         //const REQ_GET_CRC_MODE: u8 = 0x89;
+                                         //const REQ_SET_CRC_MODE: u8 = 0x8A;
 
 //const NOTIF_MAX_PACKET_SIZE: u16 = 8;
 //const NOTIF_POLL_INTERVAL: u8 = 20;
@@ -65,9 +72,6 @@ const NTB_MAX_SIZE: usize = 2048;
 const SIG_NTH: u32 = 0x484d_434e;
 const SIG_NDP_NO_FCS: u32 = 0x304d_434e;
 const SIG_NDP_WITH_FCS: u32 = 0x314d_434e;
-
-const ALTERNATE_SETTING_DISABLED: u8 = 0x00;
-const ALTERNATE_SETTING_ENABLED: u8 = 0x01;
 
 /// Simple NTB header (NTH+NDP all in one) for sending packets
 #[repr(packed)]
@@ -152,18 +156,26 @@ struct Control<'a> {
 }
 
 impl<'d> Handler for Control<'d> {
-    fn set_alternate_setting(&mut self, iface: InterfaceNumber, alternate_setting: u8) {
-        if iface != self.data_if {
-            return;
-        }
-
-        match alternate_setting {
-            ALTERNATE_SETTING_ENABLED => info!("ncm: interface enabled"),
-            ALTERNATE_SETTING_DISABLED => info!("ncm: interface disabled"),
-            _ => unreachable!(),
+    fn set_alternate_setting(&mut self, interface: InterfaceNumber, alt_setting: u8) {
+        if interface.0 == self.comm_if.0 {
+            match alt_setting {
+                0 => {}
+                _ => warn!("alternate setting for communication interface {}", alt_setting),
+            }
+        } else if interface.0 == self.data_if.0 {
+            match alt_setting {
+                0 => {
+                    info!("Entered data interface mode default - network traffic stopped")
+                }
+                1 => {
+                    info!("Entered data interface mode normal - network traffic started")
+                }
+                _ => warn!("unknown alternate setting for data interface"),
+            }
         }
     }
 
+    /// Host to Device
     fn control_out(&mut self, req: control::Request, _data: &[u8]) -> Option<OutResponse> {
         if (req.request_type, req.recipient, req.index)
             != (RequestType::Class, Recipient::Interface, self.comm_if.0 as u16)
@@ -181,10 +193,14 @@ impl<'d> Handler for Control<'d> {
                 // TODO
                 Some(OutResponse::Accepted)
             }
-            _ => Some(OutResponse::Rejected),
+            _ => {
+                warn!("rejecting request {}", req);
+                Some(OutResponse::Rejected)
+            }
         }
     }
 
+    /// Device to Host
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
         if (req.request_type, req.recipient, req.index)
             != (RequestType::Class, Recipient::Interface, self.comm_if.0 as u16)
@@ -265,83 +281,90 @@ impl<'d, D: Driver<'d>> CdcNcmClass<'d, D> {
 
         let mut func = builder.function(USB_CLASS_CDC, CDC_SUBCLASS_NCM, CDC_PROTOCOL_NONE);
 
-        // Control interface
-        let mut iface = func.interface();
-        let mac_addr_string = iface.string();
-        let comm_if = iface.interface_number();
-        let mut alt = iface.alt_setting(USB_CLASS_CDC, CDC_SUBCLASS_NCM, CDC_PROTOCOL_NONE, None);
+        // Communication interface
+        let mut comm_interface = func.interface();
+        let mac_addr_idx = comm_interface.string();
+        let comm_interface_number = comm_interface.interface_number();
+        let comm_interface_idx: u8 = comm_interface_number.0;
+        let data_interface_idx: u8 = comm_interface_idx + 1;
 
-        alt.descriptor(
-            CS_INTERFACE,
-            &[
-                CDC_TYPE_HEADER, // bDescriptorSubtype
-                0x10,
-                0x01, // bcdCDC (1.10)
-            ],
-        );
-        alt.descriptor(
-            CS_INTERFACE,
-            &[
-                CDC_TYPE_UNION,        // bDescriptorSubtype
-                comm_if.into(),        // bControlInterface
-                u8::from(comm_if) + 1, // bSubordinateInterface
-            ],
-        );
-        alt.descriptor(
-            CS_INTERFACE,
-            &[
-                CDC_TYPE_ETHERNET,      // bDescriptorSubtype
-                mac_addr_string.into(), // iMACAddress
-                0,                      // bmEthernetStatistics
-                0,                      // |
-                0,                      // |
-                0,                      // |
-                0xea,                   // wMaxSegmentSize = 1514
-                0x05,                   // |
-                0,                      // wNumberMCFilters
-                0,                      // |
-                0,                      // bNumberPowerFilters
-            ],
-        );
-        alt.descriptor(
-            CS_INTERFACE,
-            &[
-                CDC_TYPE_NCM, // bDescriptorSubtype
-                0x00,         // bcdNCMVersion
-                0x01,         // |
-                0,            // bmNetworkCapabilities
-            ],
-        );
+        let mut comm_interface = comm_interface.alt_setting(USB_CLASS_CDC, CDC_SUBCLASS_NCM, CDC_PROTOCOL_NONE, None);
 
-        let comm_ep = alt.endpoint_interrupt_in(8, 255);
+        comm_interface.descriptor(
+            CS_INTERFACE,
+            &[
+                CDC_TYPE_HEADER,
+                0x20, // bcd CDC version   probably little endian
+                0x01, // |
+            ],
+        );
+        comm_interface.descriptor(
+            CS_INTERFACE,
+            &[
+                CDC_TYPE_UNION,
+                comm_interface_idx, //bControlInterface
+                data_interface_idx, //bSubordinateInterface0
+            ],
+        );
+        comm_interface.descriptor(
+            CS_INTERFACE,
+            &[
+                CDC_TYPE_ETHERNET,
+                mac_addr_idx.into(), //iMACaddress string index
+                0,                   // bmEthernetStatistics
+                0,                   // |
+                0,                   // |
+                0,                   // |
+                0xea,                // wMaxSegmentSize = 1514
+                0x05,                // |
+                0,                   // wNumberMCFilters
+                0,                   // |
+                0,                   // bNumberPowerFilters
+            ],
+        );
+        comm_interface.descriptor(
+            CS_INTERFACE,
+            &[
+                CDC_TYPE_NCM,
+                0x00, // bcdNcmVersion  little endian
+                0x01, // |
+                0x00, // bmNetworkCapabilities
+            ],
+        );
+        let comm_ep = comm_interface.endpoint_interrupt_in(8, 255); //todo check with spec
 
         // Data interface
-        let mut iface = func.interface();
-        let data_if = iface.interface_number();
-        let _alt = iface.alt_setting(USB_CLASS_CDC_DATA, 0x00, CDC_PROTOCOL_NTB, None);
-        let mut alt = iface.alt_setting(USB_CLASS_CDC_DATA, 0x00, CDC_PROTOCOL_NTB, None);
-        let read_ep = alt.endpoint_bulk_out(max_packet_size);
-        let write_ep = alt.endpoint_bulk_in(max_packet_size);
+        let mut data_interface = func.interface();
+        let data_interface_number = data_interface.interface_number();
+        assert_eq!(data_interface_number.0, data_interface_idx);
+
+        let _data_interface_default = data_interface.alt_setting(USB_CLASS_CDC, 0x00, CDC_PROTOCOL_NTB, None); //No endpoints = no network traffic
+        let mut data_interface_normal = data_interface.alt_setting(USB_CLASS_CDC, 0x00, CDC_PROTOCOL_NTB, None); //Bulk IN & OUT endpoints
+
+        let ep_read = data_interface_normal.endpoint_bulk_out(max_packet_size);
+        let ep_write = data_interface_normal.endpoint_bulk_in(max_packet_size);
 
         drop(func);
 
         let control = state.control.write(Control {
-            mac_addr_string,
+            mac_addr_string: mac_addr_idx,
             shared: &state.shared,
             mac_addr_str: [0; 12],
-            comm_if,
-            data_if,
+            comm_if: comm_interface_number,
+            data_if: data_interface_number,
         });
         builder.handler(control);
 
         CdcNcmClass {
-            _comm_if: comm_if,
+            _comm_if: comm_interface_number,
             comm_ep,
-            data_if,
-            read_ep,
-            write_ep,
-            _control: &state.shared,
+
+            data_if: data_interface_number,
+            read_ep: ep_read,
+            write_ep: ep_write,
+
             max_packet_size: max_packet_size as usize,
+            _control: &state.shared,
         }
     }
 

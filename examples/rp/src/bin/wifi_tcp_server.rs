@@ -14,6 +14,7 @@ use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Config, StackResources};
 use embassy_rp::bind_interrupts;
+use embassy_rp::block::ImageDef;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
@@ -24,12 +25,25 @@ use rand::RngCore;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
+#[link_section = ".start_block"]
+#[used]
+pub static IMAGE_DEF: ImageDef = ImageDef::secure_exe();
+
+/// Program metadata
+#[link_section = ".bi_entries"]
+#[used]
+pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 3] = [
+    embassy_rp::binary_info::rp_program_name!(c"Wifi TCP Server"),
+    embassy_rp::binary_info::rp_cargo_version!(),
+    embassy_rp::binary_info::rp_program_build_attribute!(),
+];
+
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
 });
 
-const WIFI_NETWORK: &str = "LadronDeWifi";
-const WIFI_PASSWORD: &str = "MBfcaedHmyRFE4kaQ1O5SsY8";
+const WIFI_NETWORK: &str = "EE-Hub-3MqO";
+const WIFI_PASSWORD: &str = "rig-move-AHEAD";
 
 #[embassy_executor::task]
 async fn cyw43_task(runner: cyw43::Runner<'static, Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>>) -> ! {
@@ -43,8 +57,6 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Hello World!");
-
     let p = embassy_rp::init(Default::default());
     let mut rng = RoscRng;
 
@@ -81,6 +93,7 @@ async fn main(spawner: Spawner) {
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
+    control.gpio_set(1, false).await;
 
     let config = Config::dhcpv4(Default::default());
     //let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
@@ -99,13 +112,15 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(net_task(runner)));
 
     loop {
+        info!("Joining!");
+
         match control
             .join(WIFI_NETWORK, JoinOptions::new(WIFI_PASSWORD.as_bytes()))
             .await
         {
             Ok(_) => break,
             Err(err) => {
-                info!("join failed with status={}", err.status);
+                error!("join failed with status={}", err.status);
             }
         }
     }
@@ -123,19 +138,21 @@ async fn main(spawner: Spawner) {
     let mut tx_buffer = [0; 4096];
     let mut buf = [0; 4096];
 
+    let mut led_client = Output::new(p.PIN_13, Level::Low);
+
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(10)));
 
-        control.gpio_set(0, false).await;
         info!("Listening on TCP:1234...");
+        control.gpio_set(0, true).await;
         if let Err(e) = socket.accept(1234).await {
             warn!("accept error: {:?}", e);
             continue;
         }
 
         info!("Received connection from {:?}", socket.remote_endpoint());
-        control.gpio_set(0, true).await;
+        led_client.set_high();
 
         loop {
             let n = match socket.read(&mut buf).await {
@@ -160,5 +177,7 @@ async fn main(spawner: Spawner) {
                 }
             };
         }
+        control.gpio_set(0, false).await;
+        led_client.set_low();
     }
 }
